@@ -1,0 +1,36 @@
+name: minute5-backfill
+# 5分钟线全史回补: 每仓单 job (shard_id 由仓库名定: db-min-0→0, db-min-1→1), 每60分钟一轮
+on:
+  schedule:
+    - cron: "3 * * * *"
+  workflow_dispatch:
+    inputs:
+      batch:
+        description: "stocks per run"
+        default: "100"
+permissions:
+  contents: write
+concurrency:
+  group: minute5-backfill
+  cancel-in-progress: false
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: pip install pyarrow baostock
+      - name: run
+        run: |
+          ID=${GITHUB_REPOSITORY##*-}
+          python shard_worker_min.py $ID 2 "${{ github.event.inputs.batch || '100' }}"
+      - name: commit
+        run: |
+          git config user.name "data-bot"
+          git config user.email "bot@users.noreply.github.com"
+          git pull --rebase origin main || true
+          git add -A
+          git commit -m "minute5 backfill $(date -u +%FT%TZ)" || echo "nothing to commit"
+          git push
