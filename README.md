@@ -1,2 +1,34 @@
-# db-min-1
-A-share minute5 full-history shard (wh/minute5 monthly parquet)
+# db-min-0 / db-min-1 — A股 5 分钟线全史分片仓
+
+## 数据集
+- 表: `minute5(symbol, datetime, open, close, high, low, volume)`, datetime 格式 `YYYYMMDDHHMM`
+- 分区: `wh/minute5/{YYYYMM}.parquet` (zstd, 按月), 按 (symbol, datetime) 去重合并
+- 覆盖: 全市场 5575 只 A 股 (含北交所), 2020-01-02 至今 (Baostock 5 分钟线实测地板;
+  更早的 5 分钟数据免费源均无: 腾讯 m5 只留 ~6 个月, 新浪 ~2 个月)
+- 分片: symbol 排序后 `codes[shard::2]`, db-min-0=shard 0, db-min-1=shard 1 (每仓 ~2788 只)
+
+## 数据源 (实测 2026-10-16)
+| 源 | 用途 | 实测深度/容量 |
+|---|---|---|
+| Baostock `frequency=5` | 主力全史 | 实测 5 分钟线地板 = **2020-01-02** (日线才有更早), 单请求任意区间 (sz000001 2020 起 78,816 根, 2 年分段) |
+| 新浪 `quotes.sina.cn getKLineData scale=5` | 近期增量 | datalen 上限 ~1970 根 (~2 个月), 无翻页 |
+| 腾讯 `ifzq.gtimg.cn mkline m5` | 中段补缺 | 单页 800 根, 翻页历史深度实测只到 ~6 个月 (2026-04), 到不了 2022 |
+
+注: 任务原设想的「新浪单请求~5000 根」与「腾讯翻页到 2022」实测不成立 —
+新浪 datalen>1970 返回 null; 腾讯 m5 翻页在 2026-04 之后返空。
+故 worker 采用 三层结构: 新浪(近期) + 腾讯(中段) + Baostock(全史主力)。
+北交所 (bj*) 两源均无 5 分钟线, 仅 Baostock 亦不含, 该 ~270 只只有新浪(~2个月)+腾讯(~6个月)覆盖, 2020~2026-04 区间无免费源。
+
+## 体积估算 (全量)
+- 5 分钟线: 48 根/交易日, ~243 交易日/年 ≈ 11,664 根/年/只
+- 6.8 年 (2020-01 → 2026-10) ≈ **56,000 根/只**
+- 全市场 5,575 只 × 79,000 ≈ **4.40 亿行**
+- 实测: sz000001 全史 55,488 行 parquet(zstd) ≈ 0.85 MB → 每行 ~16 字节
+- 全量 ≈ 4.40e8 × 16 B ≈ **~7.0 GB** (zstd parquet, 留 20% 分区开销 ≈ 8.5 GB 总)
+- 每仓 (半市场) ≈ **3.5–4.5 GB** → **2 仓偏紧但可行** (GitHub 单仓硬建议 5 GB, 软限触发在 5 GB+); 单文件安全 (月分区 ~110 万行 ≈ 18 MB)。**若扩到 6 仓**: 每仓 ~1.2–1.5 GB, 富余 3 倍, 推荐回补完成后评估实际体积再决定是否拆 6 仓 (db-min-0..5)
+- 若扩到 6 仓: 单仓 ~1 GB, 更保险但非必需; 2 仓已留 ~40% 余量
+
+## 运行
+- GitHub Actions: `minute5-backfill.yml`, 每 60 分钟 (cron `3 * * * *`), 每仓每轮 1 job × 100 只
+- 断点: `shard_{0|1}_done.txt` (每完成一只追加), 支持 workflow_dispatch 手动触发 (batch 可调)
+- 回补完成后建议把 cron 改为每日 1 次增量 (省 Actions 额度)
