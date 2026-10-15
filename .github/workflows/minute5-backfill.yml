@@ -30,7 +30,7 @@ jobs:
         run: |
           git config user.name "data-bot"
           git config user.email "bot@users.noreply.github.com"
-          git pull --rebase origin main || true
           git add -A
           git commit -m "minute5 backfill $(date -u +%FT%TZ)" || echo "nothing to commit"
+          git pull --rebase origin main || (git rebase --abort && git pull --rebase=false origin main --allow-unrelated-histories)
           git push
