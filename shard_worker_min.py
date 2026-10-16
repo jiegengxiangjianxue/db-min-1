@@ -94,24 +94,15 @@ def tencent_m5(code, floor=TENCENT_FLOOR):
         time.sleep(0.35)
     return out
 
-def baostock_m5(code, start="2020-01-02", end=None):
-    """Baostock 5 分钟全史, 一次请求。code: sz000001/sh600519/bj? (北交所无, 跳过)"""
-    if code.startswith("bj"):
-        return {}
-    try:
-        import baostock as bs
-    except ImportError:
-        return {}
-    sym = code[:2] + "." + code[2:]
-    end = end or dt.date.today().isoformat()
+def _bs_worker(sym, q):
+    """子进程内跑 baostock (库内部无超时, 断线会永久阻塞 -> 必须进程级 kill)"""
+    import baostock as bs
     out = {}
+    lg = bs.login()
+    if lg.error_code != "0":
+        q.put(out); return
     try:
-        lg = bs.login()
-        if lg.error_code != "0":
-            return {}
-        # baostock 单次返回有行数上限, 按 2 年分段
-        s = dt.date.fromisoformat(start)
-        e = dt.date.fromisoformat(end)
+        s = dt.date(2020, 1, 2); e = dt.date.today()
         while s < e:
             seg_end = min(s + dt.timedelta(days=730), e)
             rs = bs.query_history_k_data_plus(
@@ -122,17 +113,37 @@ def baostock_m5(code, start="2020-01-02", end=None):
                 d, t, o, c, h, l, v = rs.get_row_data()
                 if not o:
                     continue
-                ts = d.replace("-", "") + t[8:12]  # t=YYYYMMDDHHMMSSsss -> 取 HHMM
+                ts = d.replace("-", "") + t[8:12]
                 out[ts] = [o, c, h, l, v or 0]
             s = seg_end + dt.timedelta(days=1)
-    except Exception:
-        pass
     finally:
         try:
             bs.logout()
         except Exception:
             pass
-    return out
+    q.put(out)
+
+
+def baostock_m5(code, start="2020-01-02", end=None, hard_timeout=120):
+    """Baostock 5 分钟全史, 子进程隔离 + 硬超时 (防库级挂死)。code: sz000001/sh600519"""
+    import multiprocessing as mp
+    if code.startswith("bj"):
+        return {}
+    sym = code[:2] + "." + code[2:]
+    q = mp.Queue()
+    p = mp.Process(target=_bs_worker, args=(sym, q))
+    p.start()
+    p.join(hard_timeout)
+    if p.is_alive():
+        p.terminate(); p.join(5)
+        print(f"  {code} baostock HARD-TIMEOUT {hard_timeout}s", flush=True)
+        return {}
+    if p.exitcode != 0:
+        return {}
+    try:
+        return q.get_nowait()
+    except Exception:
+        return {}
 
 def write_partitions(rows_by_month):
     """rows_by_month: {YYYYMM: [(symbol,datetime,o,c,h,l,v), ...]} — flock + tmp + os.replace 原子合并"""
